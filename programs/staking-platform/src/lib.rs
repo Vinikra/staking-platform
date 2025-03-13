@@ -52,15 +52,31 @@ pub mod staking_platform {
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
         let pool = &mut ctx.accounts.pool;
         let user_stake = &mut ctx.accounts.user_stake;
-
+    
+        // Validação apenas do amount contra o stake do usuário
         if user_stake.amount < amount {
+            msg!("Insufficient stake: {} < {}", user_stake.amount, amount);
             return err!(ErrorCode::InsufficientStake);
         }
-
-        let reward_share = (pool.total_rewards as u128 * user_stake.amount as u128)
-            / (pool.total_staked as u128);
+    
+        let reward_share = (pool.total_rewards as u128 * user_stake.amount as u128) / (pool.total_staked as u128);
         let total_amount = amount + reward_share as u64;
-
+    
+        // Logs de depuração
+        msg!("Total rewards: {}", pool.total_rewards);
+        msg!("User stake amount: {}", user_stake.amount);
+        msg!("Total staked: {}", pool.total_staked);
+        msg!("Reward share: {}", reward_share);
+        msg!("Total amount to transfer: {}", total_amount);
+    
+        // Validação do saldo da pool_token_account
+        let pool_token_account = &ctx.accounts.pool_token_account;
+        let pool_token_balance = pool_token_account.amount;
+        if total_amount > pool_token_balance {
+            msg!("Insufficient funds in pool_token_account: {} < {}", pool_token_balance, total_amount);
+            return Err(ErrorCode::InsufficientStake.into());
+        }
+    
         let cpi_accounts = Transfer {
             from: ctx.accounts.pool_token_account.to_account_info(),
             to: ctx.accounts.user_token_account.to_account_info(),
@@ -71,18 +87,28 @@ pub mod staking_platform {
         let seeds = &[b"pool".as_ref(), bump];
         let signer = &[&seeds[..]];
         token::transfer(CpiContext::new_with_signer(cpi_program, cpi_accounts, signer), total_amount)?;
-
+    
         pool.total_staked -= amount;
         user_stake.amount -= amount;
-        pool.total_rewards -= reward_share as u64;
-
+        if pool.total_rewards >= reward_share as u64 {
+            pool.total_rewards -= reward_share as u64;
+        } else {
+            pool.total_rewards = 0; // Evitar underflow
+        }
+    
         Ok(())
     }
 }
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = owner, space = 8 + 32 + 8 + 8)]
+    #[account(
+        init_if_needed,
+        payer = owner,
+        space = 8 + 32 + 8 + 8,
+        seeds = [b"pool"],
+        bump
+    )]
     pub pool: Account<'info, Pool>,
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -91,7 +117,7 @@ pub struct Initialize<'info> {
 
 #[derive(Accounts)]
 pub struct Stake<'info> {
-    #[account(mut)]
+    #[account(mut, seeds = [b"pool"], bump)]
     pub pool: Account<'info, Pool>,
     #[account(
         init_if_needed,
@@ -113,7 +139,7 @@ pub struct Stake<'info> {
 
 #[derive(Accounts)]
 pub struct DistributeRewards<'info> {
-    #[account(mut)]
+    #[account(mut, seeds = [b"pool"], bump)]
     pub pool: Account<'info, Pool>,
     #[account(mut)]
     pub owner_token_account: Account<'info, TokenAccount>,
